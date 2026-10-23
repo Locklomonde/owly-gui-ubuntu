@@ -1,6 +1,11 @@
 # Owly Native
 
 An experimental GTK4/Libadwaita companion interface for [Owly](https://github.com/t4t5/owly), an AirDrop implementation for Linux. This independent interface is not an official Owly application and does not bundle or replace Owly. Created with AI assistance and tested on Ubuntu with Owly 0.4.0.
+## Credits
+
+Powered by [Owly](https://github.com/t4t5/owly), created by [t4t5](https://github.com/t4t5) and its contributors.
+
+This is an independent, experimental Ubuntu interface built with AI assistance. It is not an official Owly project.
 
 ## Features
 
