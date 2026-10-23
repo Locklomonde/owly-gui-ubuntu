@@ -1,11 +1,10 @@
 # Owly Native
 
 An experimental GTK4/Libadwaita companion interface for [Owly](https://github.com/t4t5/owly), an AirDrop implementation for Linux. This independent interface is not an official Owly application and does not bundle or replace Owly. Created with AI assistance and tested on Ubuntu with Owly 0.4.0.
+
 ## Credits
 
-Powered by [Owly](https://github.com/t4t5/owly), created by [t4t5](https://github.com/t4t5) and its contributors.
-
-This is an independent, experimental Ubuntu interface built with AI assistance. It is not an official Owly project.
+Powered by [Owly](https://github.com/t4t5/owly), created by [t4t5](https://github.com/t4t5) and its contributors. This is an independent companion project, not an official Owly application.
 
 ## Features
 
@@ -39,18 +38,18 @@ Close other copies first: the application uses a single-instance application ID.
 
 Enable the radio and allow startup to complete. Click **Receive** for incoming requests. Unanswered requests expire; automatic acceptance is not enabled.
 
-For sending, unlock the receiving device, enable Wi-Fi and Bluetooth, set AirDrop to **Everyone for 10 Minutes**, and click **Find devices**. Select a receiver, then **Send files…**. Device names come from Owly's browse output; the app retains the corresponding service ID for sending. Addresses help distinguish identical names.
+For sending, unlock the receiving device, enable Wi-Fi and Bluetooth, set AirDrop to **Everyone for 10 Minutes**, and click **Find devices**. Select a receiver, then **Send files…**. Device names come from Owly Browse or direct AirDrop discovery; the app retains the corresponding service ID or radio address for sending. Addresses help distinguish identical names.
 
 **Stop** and closing the application interrupt its child process groups, with terminate/kill fallback. Other Owly sessions are not managed by this app. An interrupted transfer may be incomplete.
 
 ## Current limitations
 
-- Device discovery is experimental. Owly's `browse` path depends on mDNS advertisements; its send command also has a direct AWDL-peer discovery fallback that Browse does not use. An empty list can therefore occur even when a radio peer is visible. Radio peers alone do not establish a named, available receiver.
+- Device discovery uses Owly Browse plus a direct `/Discover` fallback for radio peers. Browse keeps the Bluetooth wake-up advertisement active during the search (about 30 seconds). Only peers that return an AirDrop receiver name are listed. Directly discovered receivers use `owly send --mac`. Discovery never offers or uploads files. Radio peers alone do not establish a named, available receiver.
 - VPN/local-network filters may interfere with discovery; investigate rather than assuming a VPN is the cause.
 - The UI parses human-readable Owly 0.4.0 CLI output. Upstream formatting changes may require updates. There is no structured event API integration yet.
 - Approval cards close shortly before Owly's 15-second timeout. Names are sender-reported, not verified identity.
 - Routine logs stay in memory and can contain device names, addresses and filenames. Review and redact logs before sharing them.
-- UI behavior has been checked on a GTK Broadway display; live discovery remains under investigation. There is no automated hardware transfer test suite.
+- UI behavior has been checked on a GTK Broadway display; direct name discovery was live-tested with an iPhone; broader compatibility remains experimental. There is no automated hardware transfer test suite.
 - The update button checks upstream Owly, not this companion UI.
 
 ## Contributing
@@ -68,6 +67,6 @@ Useful manual checks: receive Accept/Deny and timeout, split CLI output, duplica
 
 ## Sharing and licensing
 
-This source bundle contains only the companion interface and installer. Owly is a separate project; consult its own license for its code. Choose a license for this interface before inviting others to reuse or modify it. MIT is a common permissive option. No license has been selected on the owner's behalf in this bundle.
+This source bundle contains only the companion interface and installer. Owly is a separate project; consult its own license for its code. This interface uses the MIT license selected for the project. See LICENSE.
 
 To uninstall, close the app and remove its user application folder and `owly-native.desktop` launcher. This does not uninstall Owly.

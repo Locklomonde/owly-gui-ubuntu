@@ -1,6 +1,13 @@
 #!/usr/bin/python3
 """User-session GTK frontend for the installed Owly CLI."""
 import codecs
+import concurrent.futures
+import http.client
+import ipaddress
+import plistlib
+import socket
+import ssl
+import sys
 import errno
 import json
 import os
@@ -65,6 +72,102 @@ def check_owly_release(binary, fetch=None):
     if latest_key == current_key:
         return f'Owly {installed.lstrip("v")} is up to date with the latest stable release.', False
     return f'Owly {installed.lstrip("v")} is newer than the latest stable release ({latest.lstrip("v")}).', False
+
+
+def peer_ip(mac):
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac):
+        raise ValueError('Invalid peer address')
+    parts = bytearray.fromhex(mac.replace(':', ''))
+    parts[0] ^= 2
+    interface_id = bytes(parts[:3]) + b'\xff\xfe' + bytes(parts[3:])
+    return str(ipaddress.IPv6Address(int(ipaddress.IPv6Address('fe80::')) | int.from_bytes(interface_id, 'big')))
+
+
+def discover_peer(mac, timeout=3):
+    """Use AirDrop's /Discover only. Never ask for approval or upload data."""
+    address = peer_ip(mac)
+    scope = socket.if_nametoindex('awdl0')
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    # AirDrop receivers use self-signed certificates; match Owly's TLS behavior.
+    # This context is used only for link-local peers on awdl0, never for updates.
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    body = plistlib.dumps({}, fmt=plistlib.FMT_BINARY)
+    request = (f'POST /Discover HTTP/1.1\r\nHost: [{address}%awdl0]:8770\r\n'
+               'User-Agent: AirDrop/1.0\r\nContent-Type: application/octet-stream\r\n'
+               f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode() + body
+    deadline = time.monotonic() + timeout
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as raw:
+        raw.settimeout(timeout)
+        raw.connect((address, 8770, 0, scope))
+        with context.wrap_socket(raw, server_hostname='airdrop.local') as stream:
+            stream.settimeout(max(.1, deadline - time.monotonic()))
+            stream.sendall(request)
+            response = http.client.HTTPResponse(stream)
+            response.begin()
+            if response.status != 200:
+                return None
+            payload = bytearray()
+            while len(payload) <= 65536:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Discovery timed out')
+                stream.settimeout(remaining)
+                chunk = response.read1(min(8192, 65537 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > 65536:
+                raise ValueError('Discovery reply too large')
+            info = plistlib.loads(payload)
+            name = info.get('ReceiverComputerName') if isinstance(info, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                return None
+            return name, f'[{address}%{scope}]:8770'
+
+
+def find_devices(binary):
+    """Run inside an owned process group so Stop covers all discovery work."""
+    # Browse holds Owly's BLE advertisement while direct discovery retries.
+    # Some iPhones need around 15 seconds before opening the AirDrop port.
+    browse = subprocess.Popen([binary, 'browse', '--seconds', '30'])
+    found = set()
+    deadline = time.monotonic() + 30
+    last_error = None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            while time.monotonic() < deadline:
+                peers = subprocess.run([binary, 'radio', 'peers'], capture_output=True,
+                                       text=True, timeout=3)
+                if peers.returncode:
+                    print('Could not read radio peers: ' + peers.stderr.strip(), flush=True)
+                    return 1
+                macs = list(dict.fromkeys(re.findall(r'(?m)^((?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})\s', peers.stdout)))
+                pending = {pool.submit(discover_peer, mac): mac for mac in macs[:16] if mac not in found}
+                for future in concurrent.futures.as_completed(pending):
+                    mac = pending[future]
+                    try:
+                        receiver = future.result()
+                        if receiver:
+                            name, address = receiver
+                            print(f'mac:{mac} {json.dumps(name)} ({address})', flush=True)
+                            found.add(mac)
+                    except (OSError, ValueError, http.client.HTTPException) as exc:
+                        last_error = str(exc)
+                # Keep scanning for other devices until the window ends.
+                time.sleep(.7)
+        if not found:
+            print('Direct discovery: radio peers did not return receiver names.' if last_error else
+                  'Direct discovery: no named AirDrop receiver found.', flush=True)
+        return 0
+    finally:
+        if browse.poll() is None:
+            browse.send_signal(signal.SIGINT)
+            try:
+                browse.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                browse.kill()
+                browse.wait()
 
 
 class DeviceParser:
@@ -363,10 +466,12 @@ class App(Adw.Application):
             return
         if key == 'browse':
             self.clear_devices()
-            self.device_status.set_text('Looking for devices… Keep the receiving device unlocked with AirDrop set to Everyone.')
+            self.device_status.set_text('Looking for devices (about 30 seconds)… Keep the receiving device unlocked with AirDrop set to Everyone.')
         try:
             self.write(f'\n[{key}] Starting\n')
-            job = Job([self.owly] + args,
+            command = ([sys.executable, str(Path(__file__).resolve()), '--find-devices', self.owly]
+                       if key == 'browse' else [self.owly] + args)
+            job = Job(command,
                       lambda text, stamp: self.output(key, text, stamp),
                       lambda job, code: self.finished(key, job, code))
             self.jobs[key] = job
@@ -449,7 +554,8 @@ class App(Adw.Application):
                     files = d.get_files()
                     paths = [files.get_item(i).get_path() for i in range(files.get_n_items())]
                     if paths and all(paths) and target and target in self.devices:
-                        self.start('send', ['send', '--to', target, '--'] + paths)
+                        option, destination = ('--mac', target[4:]) if target.startswith('mac:') else ('--to', target)
+                        self.start('send', ['send', option, destination, '--'] + paths)
             d.destroy()
         dialog.connect('response', selected)
         dialog.show()
@@ -462,6 +568,10 @@ class App(Adw.Application):
 
     def device_found(self, ident, name, address):
         if ident in self.devices:
+            return
+        def host(value):
+            return value.split(']')[0].lstrip('[').split('%')[0]
+        if any(host(existing[1]) == host(address) for existing in self.devices.values()):
             return
         self.devices[ident] = (name, address)
         # Keep the CLI service ID as the hidden value, so duplicate display names
@@ -543,4 +653,13 @@ class App(Adw.Application):
 
 
 if __name__ == '__main__':
-    App().run()
+    if len(sys.argv) == 3 and sys.argv[1] == '--find-devices':
+        try:
+            sys.exit(find_devices(sys.argv[2]))
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f'Device search failed: {exc}', flush=True)
+            sys.exit(1)
+    else:
+        App().run()
